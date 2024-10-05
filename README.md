@@ -6,12 +6,12 @@
    git clone https://github.com/VAISHALI-NILE/Poc-backend.git
    cd Poc-backend
 
-2. **Install Dependencies:**
+**Install Dependencies:**
     Ensure you have Node.js installed, then run:
    ```bash
     npm install
-
-3.**Environment Configuration:** 
+```
+**Environment Configuration:** 
     Create a .env file in the root directory of the backend and add the following API keys: 
     File: .env 
     ```bash
@@ -20,7 +20,7 @@
     GOOGLE_CUSTOM_SEARCH_API_KEY=your_google_custom_search_api_key 
     GOOGLE_CUSTOM_SEARCH_CX=your_google_custom_search_cx
 
-4.**Run the Backend Application:**
+**Run the Backend Application:**
     ```bash
       
       node app.js 
