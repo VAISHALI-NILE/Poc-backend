@@ -1,98 +1,92 @@
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const app = express();
 const cors = require("cors");
 const cheerio = require("cheerio");
+
+const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Middleware
 app.use(cors());
 app.use(express.json());
 
 // Set up API keys from .env
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
-const GOOGLE_CUSTOM_SEARCH_API_KEY = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY;
-const GOOGLE_CUSTOM_SEARCH_CX = process.env.GOOGLE_CUSTOM_SEARCH_CX;
+const {
+  YOUTUBE_API_KEY,
+  GOOGLE_CUSTOM_SEARCH_API_KEY,
+  GOOGLE_CUSTOM_SEARCH_CX,
+} = process.env;
 
-// Function to calculate the score for YouTube videos
+// Helper functions
 const calculateYoutubeScore = (video) => {
   const views = video.views || 0;
   const likes = video.likes || 0;
-  const engagementRate = likes / (views + 1);
+  const engagementRate = views > 0 ? likes / views : 0; // Prevent division by zero
 
-  // Define weights for each metric
-  const viewsWeight = 0.5;
-  const likesWeight = 0.3;
-  const engagementWeight = 0.2;
-
-  return (
-    views * viewsWeight +
-    likes * likesWeight +
-    engagementRate * 100 * engagementWeight
-  );
+  return views * 0.5 + likes * 0.3 + engagementRate * 100 * 0.2;
 };
 
-// Function to calculate the score for articles
 const calculateArticleScore = (article) => {
   const relevanceScore = article.snippet.length;
   const domainScore = article.source.includes("reputable-site.com") ? 1 : 0;
   return relevanceScore + domainScore * 10;
 };
 
-// Function to calculate the score for academic papers
 const calculatePaperScore = (paper) => {
-  const citations = paper.citations || 0; // Assume citations are retrieved somehow
-  const recency = new Date().getFullYear() - new Date(paper.date).getFullYear(); // Years since publication
-
-  return citations - recency; // Score can be further adjusted based on more metrics
+  const citations = paper.citations || 0;
+  const recency = paper.date
+    ? new Date().getFullYear() - new Date(paper.date).getFullYear()
+    : 0;
+  return citations - recency;
 };
 
-// Function to fetch YouTube videos based on a search query
+// Fetch YouTube videos
 const getYoutubeVideos = async (query, pageToken = "") => {
-  try {
-    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&maxResults=50&q=${query}&key=${YOUTUBE_API_KEY}&pageToken=${pageToken}`;
-    const response = await axios.get(url);
+  const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&maxResults=50&q=${encodeURIComponent(
+    query
+  )}&key=${YOUTUBE_API_KEY}&pageToken=${pageToken}`;
 
+  try {
+    const response = await axios.get(url);
     const videoIds = response.data.items
       .map((item) => item.id.videoId)
-      .filter((id) => id !== undefined)
+      .filter(Boolean) // Filters out undefined or null values
       .join(",");
 
-    if (!videoIds) {
-      return []; // No video IDs found
-    }
+    if (!videoIds) return []; // No video IDs found
 
-    // Fetch statistics for each video
     const statsUrl = `https://www.googleapis.com/youtube/v3/videos?part=statistics&id=${videoIds}&key=${YOUTUBE_API_KEY}`;
     const statsResponse = await axios.get(statsUrl);
 
-    const videoDetails = response.data.items.map((item, index) => {
-      const stats = statsResponse.data.items[index]?.statistics || {};
-      const video = {
-        title: item.snippet.title,
-        url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
-        thumbnail: item.snippet.thumbnails.medium.url,
-        views: parseInt(stats.viewCount, 10) || 0,
-        likes: parseInt(stats.likeCount, 10) || 0,
-        nextPageToken: response.data.nextPageToken, // Get next page token for pagination
-      };
+    return response.data.items
+      .map((item, index) => {
+        const stats = statsResponse.data.items[index]?.statistics || {};
+        const video = {
+          title: item.snippet.title,
+          url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
+          thumbnail: item.snippet.thumbnails?.medium?.url || "",
+          views: parseInt(stats.viewCount, 10) || 0,
+          likes: parseInt(stats.likeCount, 10) || 0,
+          nextPageToken: response.data.nextPageToken, // For pagination
+          score: 0, // Initialize score to be calculated later
+        };
 
-      video.score = calculateYoutubeScore(video); // Calculate the score
-      return video;
-    });
-
-    // Sort videos by score
-    return videoDetails.sort((a, b) => b.score - a.score);
+        video.score = calculateYoutubeScore(video); // Calculate the score
+        return video;
+      })
+      .sort((a, b) => b.score - a.score); // Sort by score
   } catch (error) {
     console.error("Error fetching YouTube data:", error.message);
     throw new Error("Could not fetch YouTube data");
   }
 };
 
-// Route to handle YouTube search requests
+// YouTube search route
 app.get("/search", async (req, res) => {
   const searchTerm = req.query.q;
-  const pageToken = req.query.pageToken; // Get pageToken from query
+  const pageToken = req.query.pageToken;
+
   if (!searchTerm) {
     return res.status(400).send("Please provide a search term");
   }
@@ -105,46 +99,40 @@ app.get("/search", async (req, res) => {
   }
 });
 
-// Function to fetch articles from Google Custom Search API
+// Fetch articles
 const fetchGoogleArticles = async (query, startIndex = 1) => {
+  const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(
+    query
+  )}&key=${GOOGLE_CUSTOM_SEARCH_API_KEY}&cx=${GOOGLE_CUSTOM_SEARCH_CX}&start=${startIndex}`;
+
   try {
-    const url = `https://www.googleapis.com/customsearch/v1?q=${query}&key=${GOOGLE_CUSTOM_SEARCH_API_KEY}&cx=${GOOGLE_CUSTOM_SEARCH_CX}&start=${startIndex}`;
     const response = await axios.get(url);
-
-    if (!response.data.items || response.data.items.length === 0) {
-      throw new Error("No articles found");
-    }
-
-    const articles = response.data.items.map((item) => {
-      const article = {
-        title: item.title,
-        url: item.link,
+    const articles = response.data.items.map((item) => ({
+      title: item.title,
+      url: item.link,
+      snippet: item.snippet,
+      source: item.displayLink,
+      score: calculateArticleScore({
         snippet: item.snippet,
         source: item.displayLink,
-      };
+      }),
+    }));
 
-      article.score = calculateArticleScore(article); // Calculate the score
-      return article;
-    });
-
-    // Sort articles by score
     return {
       articles: articles.sort((a, b) => b.score - a.score),
       nextStartIndex: startIndex + 10,
     };
   } catch (error) {
-    console.error(
-      "Error fetching articles from Google Custom Search:",
-      error.message
-    );
+    console.error("Error fetching articles:", error.message);
     throw new Error("Could not fetch articles from Google Custom Search");
   }
 };
 
-// Route to handle article search requests
+// Articles search route
 app.get("/articles", async (req, res) => {
   const searchTerm = req.query.q;
-  const startIndex = req.query.start || 1; // Get start index from query
+  const startIndex = parseInt(req.query.start) || 1;
+
   if (!searchTerm) {
     return res.status(400).send("Please provide a search term");
   }
@@ -160,55 +148,51 @@ app.get("/articles", async (req, res) => {
   }
 });
 
-// Function to fetch academic papers from Google Scholar
+// Fetch academic papers
 const getAcademicPapers = async (query) => {
-  try {
-    const searchUrl = `https://scholar.google.com/scholar?q=${encodeURIComponent(
-      query
-    )}`;
-    const response = await axios.get(searchUrl);
+  const searchUrl = `https://scholar.google.com/scholar?q=${encodeURIComponent(
+    query
+  )}`;
 
+  try {
+    const response = await axios.get(searchUrl);
     const $ = cheerio.load(response.data);
     const papers = [];
 
     $(".gs_ri").each((i, elem) => {
       const titleElement = $(elem).find(".gs_rt a");
       const title = titleElement.text();
-      const url = titleElement.attr("href") || ""; // Default to empty string if no href
+      const url = titleElement.attr("href") || "";
       const summary = $(elem).find(".gs_rs").text();
-
-      // Assume we retrieve citations and date somehow
       const citations =
-        parseInt($(elem).find(".gs_fl").text().match(/\d+/)) || 0; // Example for citation retrieval
-      const date = $(elem)
+        parseInt($(elem).find(".gs_fl").text().match(/\d+/)) || 0;
+      const dateMatch = $(elem)
         .find(".gs_a")
         .text()
-        .match(/(\d{4})/); // Year of publication
+        .match(/(\d{4})/);
+      const date = dateMatch ? dateMatch[0] : null;
 
       papers.push({
         title,
         url,
         summary,
         citations,
-        date: date ? date[0] : null, // Extract year from text
+        date,
         score: calculatePaperScore({ citations, date }), // Calculate score
       });
     });
 
-    // Sort papers by score
     return papers.sort((a, b) => b.score - a.score);
   } catch (error) {
-    console.error(
-      "Error fetching academic papers from Google Scholar:",
-      error.message
-    );
+    console.error("Error fetching academic papers:", error.message);
     throw new Error("Could not fetch academic papers");
   }
 };
 
-// Route to handle academic papers search requests
+// Academic papers search route
 app.get("/papers", async (req, res) => {
   const searchTerm = req.query.q;
+
   if (!searchTerm) {
     return res.status(400).send("Please provide a search term");
   }
@@ -225,35 +209,28 @@ app.get("/papers", async (req, res) => {
   }
 });
 
-// Function to fetch blog posts from Google Custom Search API
+// Fetch blog posts
 const getBlogPosts = async (query, startIndex = 1) => {
-  try {
-    const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(
-      query + " blog"
-    )}&cx=${GOOGLE_CUSTOM_SEARCH_CX}&key=${GOOGLE_CUSTOM_SEARCH_API_KEY}&start=${startIndex}`;
-    const response = await axios.get(url);
+  const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(
+    query + " blog"
+  )}&cx=${GOOGLE_CUSTOM_SEARCH_CX}&key=${GOOGLE_CUSTOM_SEARCH_API_KEY}&start=${startIndex}`;
 
-    // Return only entries that are more likely to be blogs
+  try {
+    const response = await axios.get(url);
     const blogPosts = response.data.items
       .filter(
         (item) =>
           item.link.includes("blog") ||
           item.link.includes(".blog.") ||
-          item.link.includes("post") ||
-          (item.snippet && item.snippet.includes("blog"))
+          item.link.includes("post")
       )
-      .map((item) => {
-        const blog = {
-          title: item.title,
-          url: item.link,
-          snippet: item.snippet,
+      .map((item) => ({
+        title: item.title,
+        url: item.link,
+        snippet: item.snippet,
+        imageUrl: item.pagemap?.cse_image?.[0]?.src,
+      }));
 
-          imageUrl: item.pagemap?.cse_image?.[0]?.src,
-        };
-        return blog;
-      });
-
-    // Sort blog posts by score
     return {
       blogs: blogPosts,
       nextStartIndex: startIndex + 10,
@@ -264,10 +241,11 @@ const getBlogPosts = async (query, startIndex = 1) => {
   }
 };
 
-// Route to handle blog search requests
+// Blog search route
 app.get("/blogs", async (req, res) => {
   const searchTerm = req.query.q;
-  const startIndex = req.query.start || 1; // Get start index from query
+  const startIndex = parseInt(req.query.start) || 1;
+
   if (!searchTerm) {
     return res.status(400).send("Please provide a search term");
   }
